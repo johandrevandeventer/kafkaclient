@@ -1,28 +1,28 @@
 package config
 
 type KafkaProducerConfig struct {
-	Brokers    []string
+	Broker     string
 	MaxRetries int
 	PoolSize   int
 }
 
 type KafkaConsumerConfig struct {
-	Brokers []string
+	Broker  string
 	Topic   string
 	GroupID string // For consumer groups
 }
 
-func NewKafkaProducerConfig(brokers []string, maxRetries int, poolSize int) *KafkaProducerConfig {
+func NewKafkaProducerConfig(brokers string, maxRetries int, poolSize int) *KafkaProducerConfig {
 	return &KafkaProducerConfig{
-		Brokers:    brokers,
+		Broker:     brokers,
 		MaxRetries: maxRetries,
 		PoolSize:   poolSize,
 	}
 }
 
-func NewKafkaConsumerConfig(brokers []string, topic string, groupID string) *KafkaConsumerConfig {
+func NewKafkaConsumerConfig(brokers string, topic string, groupID string) *KafkaConsumerConfig {
 	return &KafkaConsumerConfig{
-		Brokers: brokers,
+		Broker:  brokers,
 		Topic:   topic,
 		GroupID: groupID,
 	}

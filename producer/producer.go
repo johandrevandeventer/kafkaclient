@@ -58,7 +58,7 @@ func NewKafkaProducerPool(cfg *config.KafkaProducerConfig, logger *zap.Logger) (
 
 	for i := 0; i < cfg.PoolSize; i++ {
 		producer, err := kafka.NewProducer(&kafka.ConfigMap{
-			"bootstrap.servers": cfg.Brokers,
+			"bootstrap.servers": cfg.Broker,
 		})
 		if err != nil {
 			return nil, err
