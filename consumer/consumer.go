@@ -56,6 +56,7 @@ type KafkaConsumer struct {
 func NewKafkaConsumer(ctx context.Context, cfg *config.KafkaConsumerConfig, logger *zap.Logger) (*KafkaConsumer, error) {
 	c, err := kafka.NewConsumer(&kafka.ConfigMap{
 		"bootstrap.servers": cfg.Broker,
+		"log_level":         0,
 		"group.id":          cfg.GroupID,
 		"auto.offset.reset": "earliest",
 	})
