@@ -147,6 +147,7 @@ func (kpp *KafkaProducerPool) SendMessage(ctx context.Context, topic string, mes
 
 	operation := func() error {
 		errChan := make(chan error, 1)
+		kpp.wg.Add(1)
 		go func() {
 			errChan <- producer.Produce(&kafka.Message{
 				TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
@@ -182,20 +183,18 @@ func (kpp *KafkaProducerPool) SendMessage(ctx context.Context, topic string, mes
 func (kpp *KafkaProducerPool) Close() {
 	kpp.logger.Info("Closing Kafka producer pool...")
 
-	// Wait for the delivery report handling goroutine to finish
-	kpp.wg.Add(1)
-
 	// Close the producer channel (only once)
 	close(kpp.producers)
 
 	// Wait for all the producers to be returned to the pool
 	for producer := range kpp.producers {
 		// Flush pending messages
+		kpp.logger.Debug("Flushing producer", zap.String("producer", fmt.Sprintf("%p", producer)))
 		remaining := producer.Flush(5000) // 5-second timeout
 		if remaining > 0 {
 			kpp.logger.Warn("Failed to flush all messages", zap.Int("remaining_messages", remaining))
 		} else {
-			kpp.logger.Info("All messages flushed successfully")
+			kpp.logger.Debug("All messages flushed successfully")
 		}
 
 		// Close the producer after flushing
