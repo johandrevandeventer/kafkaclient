@@ -178,13 +178,18 @@ func (kpp *KafkaProducerPool) SendMessage(ctx context.Context, topic string, mes
 	return nil
 }
 
-// Close shuts down the Kafka producer gracefully.
+// Close shuts down the Kafka producer pool gracefully.
 func (kpp *KafkaProducerPool) Close() {
 	kpp.logger.Info("Closing Kafka producer pool...")
+
+	// Wait for the delivery report handling goroutine to finish
+	kpp.wg.Add(1)
+
+	// Close the producer channel (only once)
 	close(kpp.producers)
 
+	// Wait for all the producers to be returned to the pool
 	for producer := range kpp.producers {
-
 		// Flush pending messages
 		remaining := producer.Flush(5000) // 5-second timeout
 		if remaining > 0 {
@@ -193,8 +198,15 @@ func (kpp *KafkaProducerPool) Close() {
 			kpp.logger.Info("All messages flushed successfully")
 		}
 
-		close(kpp.deliveryChan)
+		// Close the producer after flushing
 		producer.Close()
 	}
+
+	// Close the delivery channel after processing all delivery events
+	close(kpp.deliveryChan)
+
+	// Wait for the delivery report handling goroutine to finish processing
 	kpp.wg.Wait()
+
+	kpp.logger.Info("Kafka producer pool closed successfully")
 }
