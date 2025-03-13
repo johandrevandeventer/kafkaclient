@@ -15,11 +15,16 @@ import (
 
 // Configurable parameters
 const (
-	defaultPollTimeout = 100 * time.Millisecond // Default timeout for polling messages
-	defaultChannelSize = 1000                   // Default size of the output channel
-	monitorInterval    = 60 * time.Second       // Interval for monitoring channel usage
-	pauseResumeDelay   = 1 * time.Second        // Delay before resuming consumer after pause
+	defaultPollTimeout = 10 * time.Millisecond // Default timeout for polling messages
+	defaultChannelSize = 1000                  // Default size of the output channel
+	monitorInterval    = 60 * time.Second      // Interval for monitoring channel usage
+	pauseResumeDelay   = 1 * time.Second       // Delay before resuming consumer after pause
 )
+
+type partitionOffsets struct {
+	low  int64
+	high int64
+}
 
 // Metrics
 var (
@@ -54,7 +59,7 @@ type KafkaConsumer struct {
 }
 
 func NewKafkaConsumer(ctx context.Context, cfg *config.KafkaConsumerConfig, logger *zap.Logger) (*KafkaConsumer, error) {
-	c, err := kafka.NewConsumer(&kafka.ConfigMap{
+	consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
 		"bootstrap.servers": cfg.Broker,
 		"log_level":         0,
 		"group.id":          cfg.GroupID,
@@ -67,7 +72,7 @@ func NewKafkaConsumer(ctx context.Context, cfg *config.KafkaConsumerConfig, logg
 	logger.Info("Kafka consumer created successfully")
 
 	kc := &KafkaConsumer{
-		consumer:      c,
+		consumer:      consumer,
 		topic:         cfg.Topic,
 		ctx:           ctx,
 		logger:        logger,
@@ -109,6 +114,11 @@ func (kc *KafkaConsumer) Start() error {
 	}
 
 	kc.logger.Info("Successfully subscribed to Kafka topics", zap.Strings("topics", []string{kc.topic}))
+
+	// Start the lag tracker
+	kc.wg.Add(1)
+	go kc.startLagTracker()
+
 	kc.wg.Add(1)
 	go kc.consumeMessages()
 
@@ -118,7 +128,6 @@ func (kc *KafkaConsumer) Start() error {
 // consumeMessages starts consuming messages from the Kafka topic.
 func (kc *KafkaConsumer) consumeMessages() {
 	defer kc.wg.Done()
-
 	for {
 		select {
 		case <-kc.ctx.Done():
@@ -153,11 +162,19 @@ func (kc *KafkaConsumer) consumeMessages() {
 					consumeErrors.WithLabelValues(*e.TopicPartition.Topic).Inc()
 					continue
 				}
-				kc.logger.Info("Received message",
-					zap.String("kafka_topic", *e.TopicPartition.Topic),
-					zap.String("mqtt_topic", p.MqttTopic),
-					zap.Int64("offset", int64(e.TopicPartition.Offset)),
-				)
+
+				if p.MqttTopic == "" {
+					kc.logger.Info("Received message",
+						zap.String("kafka_topic", *e.TopicPartition.Topic),
+						zap.Int64("offset", int64(e.TopicPartition.Offset)),
+					)
+				} else {
+					kc.logger.Info("Received message",
+						zap.String("kafka_topic", *e.TopicPartition.Topic),
+						zap.String("mqtt_topic", p.MqttTopic),
+						zap.Int64("offset", int64(e.TopicPartition.Offset)),
+					)
+				}
 				messagesConsumed.WithLabelValues(*e.TopicPartition.Topic).Inc()
 
 				// Serialize the Payload struct into a byte slice (e.g., JSON)
@@ -173,23 +190,67 @@ func (kc *KafkaConsumer) consumeMessages() {
 					kc.logger.Warn("Output channel is full, dropping message")
 					consumeErrors.WithLabelValues(*e.TopicPartition.Topic).Inc()
 				}
-
-				// Track consumer lag
-				partitions, err := kc.consumer.Assignment()
-				if err == nil {
-					for _, partition := range partitions {
-						_, high, err := kc.consumer.QueryWatermarkOffsets(*partition.Topic, partition.Partition, 1000)
-						if err == nil {
-							lag := high - int64(e.TopicPartition.Offset)
-							consumerLag.WithLabelValues(*partition.Topic, string(partition.Partition)).Set(float64(lag))
-						}
-					}
-				}
 			case kafka.PartitionEOF:
 				kc.logger.Info("Reached end of partition", zap.String("topic", *e.Topic))
 			case kafka.Error:
 				kc.logger.Error("Kafka error", zap.Error(e))
 				consumeErrors.WithLabelValues(kc.topic).Inc()
+			}
+		}
+	}
+}
+
+func (kc *KafkaConsumer) startLagTracker() {
+	defer kc.wg.Done()
+
+	ticker := time.NewTicker(30 * time.Second) // Adjust the interval as needed
+	defer ticker.Stop()
+
+	// Cache for watermark offsets
+	watermarkCache := make(map[kafka.TopicPartition]partitionOffsets)
+
+	for {
+		select {
+		case <-kc.ctx.Done():
+			kc.logger.Info("Stopping lag tracker")
+			return
+		case <-ticker.C:
+			partitions, err := kc.consumer.Assignment()
+			if err != nil {
+				kc.logger.Error("Failed to get assigned partitions", zap.Error(err))
+				continue
+			}
+
+			// Update watermark cache
+			for _, partition := range partitions {
+				low, high, err := kc.consumer.QueryWatermarkOffsets(*partition.Topic, partition.Partition, 1000)
+				if err != nil {
+					kc.logger.Error("Failed to query watermark offsets",
+						zap.String("topic", *partition.Topic),
+						zap.Int32("partition", partition.Partition),
+						zap.Error(err),
+					)
+					continue
+				}
+				watermarkCache[partition] = partitionOffsets{low: low, high: high}
+			}
+
+			// Track lag using cached watermarks
+			for partition, offsets := range watermarkCache {
+				offset, err := kc.consumer.Position([]kafka.TopicPartition{partition})
+				if err != nil {
+					kc.logger.Error("Failed to get current offset",
+						zap.String("topic", *partition.Topic),
+						zap.Int32("partition", partition.Partition),
+						zap.Error(err),
+					)
+					continue
+				}
+
+				lag := offsets.high - int64(offset[0].Offset)
+
+				// Update Prometheus gauge
+				consumerLag.WithLabelValues(*partition.Topic, string(partition.Partition)).Set(float64(lag))
 			}
 		}
 	}
@@ -207,4 +268,9 @@ func (kc *KafkaConsumer) Close() {
 
 	// Wait for all goroutines to finish
 	kc.wg.Wait()
+}
+
+// GetOutputChannel returns the output channel for the Kafka consumer.
+func (kc *KafkaConsumer) GetOutputChannel() <-chan []byte {
+	return kc.outputChannel
 }

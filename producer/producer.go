@@ -40,6 +40,7 @@ var (
 )
 
 type KafkaProducerPool struct {
+	ctx          context.Context
 	producers    chan *kafka.Producer
 	logger       *zap.Logger
 	config       *config.KafkaProducerConfig
@@ -48,8 +49,9 @@ type KafkaProducerPool struct {
 	maxRetries   int
 }
 
-func NewKafkaProducerPool(cfg *config.KafkaProducerConfig, logger *zap.Logger) (*KafkaProducerPool, error) {
+func NewKafkaProducerPool(ctx context.Context, cfg *config.KafkaProducerConfig, logger *zap.Logger) (*KafkaProducerPool, error) {
 	pool := &KafkaProducerPool{
+		ctx:          ctx,
 		producers:    make(chan *kafka.Producer, cfg.PoolSize),
 		config:       cfg,
 		logger:       logger,
@@ -79,8 +81,14 @@ func NewKafkaProducerPool(cfg *config.KafkaProducerConfig, logger *zap.Logger) (
 // handleDeliveryReports processes delivery reports from Kafka.
 func (kpp *KafkaProducerPool) handleDeliveryReports() {
 	defer kpp.wg.Done()
-	for e := range kpp.deliveryChan {
-		kpp.processDeliveryEvent(e)
+	for {
+		select {
+		case e := <-kpp.deliveryChan:
+			kpp.processDeliveryEvent(e)
+		case <-kpp.ctx.Done():
+			kpp.logger.Info("Delivery report handler cancelled")
+			return
+		}
 	}
 }
 
@@ -106,11 +114,18 @@ func (kpp *KafkaProducerPool) processDeliveryEvent(e kafka.Event) {
 			return
 		}
 
-		kpp.logger.Info("Message delivered",
-			zap.String("kafka_topic", *ev.TopicPartition.Topic),
-			zap.String("mqtt_topic", p.MqttTopic),
-			zap.Int64("offset", int64(ev.TopicPartition.Offset)),
-		)
+		if p.MqttTopic != "" {
+			kpp.logger.Info("Message delivered",
+				zap.String("kafka_topic", *ev.TopicPartition.Topic),
+				zap.String("mqtt_topic", p.MqttTopic),
+				zap.Int64("offset", int64(ev.TopicPartition.Offset)),
+			)
+		} else {
+			kpp.logger.Info("Message delivered",
+				zap.String("kafka_topic", *ev.TopicPartition.Topic),
+				zap.Int64("offset", int64(ev.TopicPartition.Offset)),
+			)
+		}
 		messagesProduced.WithLabelValues(*ev.TopicPartition.Topic).Inc()
 	}
 }
@@ -139,6 +154,19 @@ func (kpp *KafkaProducerPool) SendMessage(ctx context.Context, topic string, mes
 		return fmt.Errorf("failed to deserialize payload: %w", err)
 	}
 
+	if p.MqttTopic != "" {
+		kpp.logger.Debug("Sending message to Kafka",
+			zap.String("mqtt_topic", p.MqttTopic),
+			zap.String("kafka_topic", topic),
+			zap.Int("payload_size", len(p.Message)),
+		)
+	} else {
+		kpp.logger.Debug("Sending message to Kafka",
+			zap.String("kafka_topic", topic),
+			zap.Int("payload_size", len(p.Message)),
+		)
+	}
+
 	// Serialize the Payload struct into a byte slice (e.g., JSON)
 	serializedPayload, err := p.Serialize()
 	if err != nil {
@@ -146,29 +174,17 @@ func (kpp *KafkaProducerPool) SendMessage(ctx context.Context, topic string, mes
 	}
 
 	operation := func() error {
-		errChan := make(chan error, 1)
-		kpp.wg.Add(1)
-		go func() {
-			errChan <- producer.Produce(&kafka.Message{
-				TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
-				Value:          serializedPayload,
-			}, kpp.deliveryChan)
-		}()
-
-		select {
-		case err := <-errChan:
-			return err
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		// Use the produce call synchronously
+		return producer.Produce(&kafka.Message{
+			TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+			Value:          serializedPayload,
+		}, kpp.deliveryChan)
 	}
 
+	// Retry operation using backoff
 	retryBackoff := backoff.WithMaxRetries(backoff.NewExponentialBackOff(), uint64(kpp.maxRetries))
 	err = backoff.RetryNotify(operation, backoff.WithContext(retryBackoff, ctx), func(err error, duration time.Duration) {
-		kpp.logger.Warn("Failed to send message, retrying...",
-			zap.Error(err),
-			zap.Duration("retry_after", duration),
-		)
+		kpp.logger.Warn("Failed to send message, retrying...", zap.Error(err), zap.Duration("retry_after", duration))
 	})
 
 	if err != nil {
