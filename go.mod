@@ -5,6 +5,7 @@ go 1.22.0
 require (
 	github.com/cenkalti/backoff v2.2.1+incompatible
 	github.com/confluentinc/confluent-kafka-go/v2 v2.8.0
+	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.21.1
 	go.uber.org/zap v1.27.0
 )
