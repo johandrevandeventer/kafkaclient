@@ -165,11 +165,13 @@ func (kc *KafkaConsumer) consumeMessages() {
 
 				if p.MqttTopic == "" {
 					kc.logger.Info("Received message",
+						zap.String("id", p.ID.String()),
 						zap.String("kafka_topic", *e.TopicPartition.Topic),
 						zap.Int64("offset", int64(e.TopicPartition.Offset)),
 					)
 				} else {
 					kc.logger.Info("Received message",
+						zap.String("id", p.ID.String()),
 						zap.String("kafka_topic", *e.TopicPartition.Topic),
 						zap.String("mqtt_topic", p.MqttTopic),
 						zap.Int64("offset", int64(e.TopicPartition.Offset)),

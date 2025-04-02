@@ -15,12 +15,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// Configurable parameters
-// const (
-// 	defaultTimeout = 10 * time.Second // Default timeout for sending messages
-// 	maxRetries     = 5                // Maximum number of retries for sending messages
-// )
-
 // Metrics
 var (
 	messagesProduced = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -116,12 +110,14 @@ func (kpp *KafkaProducerPool) processDeliveryEvent(e kafka.Event) {
 
 		if p.MqttTopic != "" {
 			kpp.logger.Info("Message delivered",
+				zap.String("id", p.ID.String()),
 				zap.String("kafka_topic", *ev.TopicPartition.Topic),
 				zap.String("mqtt_topic", p.MqttTopic),
 				zap.Int64("offset", int64(ev.TopicPartition.Offset)),
 			)
 		} else {
 			kpp.logger.Info("Message delivered",
+				zap.String("id", p.ID.String()),
 				zap.String("kafka_topic", *ev.TopicPartition.Topic),
 				zap.Int64("offset", int64(ev.TopicPartition.Offset)),
 			)
@@ -156,12 +152,14 @@ func (kpp *KafkaProducerPool) SendMessage(ctx context.Context, topic string, mes
 
 	if p.MqttTopic != "" {
 		kpp.logger.Debug("Sending message to Kafka",
-			zap.String("mqtt_topic", p.MqttTopic),
+			zap.String("id", p.ID.String()),
 			zap.String("kafka_topic", topic),
+			zap.String("mqtt_topic", p.MqttTopic),
 			zap.Int("payload_size", len(p.Message)),
 		)
 	} else {
 		kpp.logger.Debug("Sending message to Kafka",
+			zap.String("id", p.ID.String()),
 			zap.String("kafka_topic", topic),
 			zap.Int("payload_size", len(p.Message)),
 		)
