@@ -3,9 +3,12 @@ package payload
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type Payload struct {
+	ID               uuid.UUID `json:"id"`
 	MqttTopic        string    `json:"mqtt_topic"`
 	Message          []byte    `json:"message"`
 	MessageTimestamp time.Time `json:"message_timestamp"`
